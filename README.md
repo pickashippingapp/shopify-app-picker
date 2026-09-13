@@ -1,4 +1,4 @@
-# shopify-app-reviews
+# shopify-app-picker
 
 The pipeline behind [pickashippingapp.com](https://pickashippingapp.com): scrape a Shopify App Store
 category and every review of every app in it, compute per-app statistics, and have Claude write a
