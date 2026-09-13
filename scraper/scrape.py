@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Scrape a Shopify App Store category and every review of its apps into JSONL.
+
+Usage:
+  scrape.py listing [category]   -> data/apps.jsonl   (one row per app card; category is the slug from the
+                                    apps.shopify.com/categories/<slug> URL, default: shipping solutions)
+  scrape.py reviews [--min N]    -> data/reviews.jsonl (every review of every app; resumable)
+  scrape.py reparse              -> rebuild data/reviews.jsonl from the raw HTML cache, no network
+
+Every fetched reviews page is kept gzipped under data/raw/<handle>/p<N>.html.gz so parser
+fixes never cost a refetch.
+
+Stdlib only. Polite: one request per DELAY seconds, browser UA, retries with backoff.
+Resumable: reviews for a handle are written only when all its pages succeeded, and
+handles already present in data/reviews_done.txt are skipped on the next run.
+"""
+import gzip, json, re, sys, time, urllib.request, urllib.error, html
+from html.parser import HTMLParser
+from pathlib import Path
+
+BASE = "https://apps.shopify.com"
+CATEGORY = "orders-and-shipping-shipping-solutions-shipping"
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36"
+DELAY = 1.0
+DATA = Path(__file__).resolve().parent.parent / "data"
+RAW = DATA / "raw"
+
+
+def get(url, tries=5):
+    for attempt in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                body = r.read().decode("utf-8", "replace")
+            time.sleep(DELAY)
+            return body
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            wait = 5 * (attempt + 1) if e.code in (429, 503) else 2
+            print(f"  http {e.code} on {url}, retry in {wait}s", file=sys.stderr)
+            time.sleep(wait)
+        except Exception as e:  # network blips
+            print(f"  {type(e).__name__} on {url}, retry", file=sys.stderr)
+            time.sleep(3)
+    raise RuntimeError(f"gave up on {url}")
+
+
+class Blocks(HTMLParser):
+    """Collect ordered text tokens (plus a few attribute markers) inside every element
+    that carries `marker_attr`. Skips script/style/svg."""
+
+    def __init__(self, marker_attr):
+        super().__init__()
+        self.marker_attr = marker_attr
+        self.blocks = []      # list of (attrs, tokens)
+        self.stack = []       # depth counters for open blocks
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag in ("script", "style", "svg"):
+            self.skip += 1
+        if self.marker_attr in a:
+            self.blocks.append((a, []))
+            self.stack.append(1)
+        elif self.stack:
+            self.stack[-1] += 1
+        if self.stack and not self.skip:
+            toks = self.blocks[-1][1]
+            if "aria-label" in a and tag not in ("svg", "path"):
+                toks.append(("aria", a["aria-label"]))
+            if tag == "a" and "href" in a:
+                toks.append(("href", a["href"]))
+            if "title" in a and a["title"] != "Copy link to review":
+                toks.append(("title", a["title"]))
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "svg"):
+            self.skip = max(0, self.skip - 1)
+        if self.stack:
+            self.stack[-1] -= 1
+            if self.stack[-1] == 0:
+                self.stack.pop()
+
+    def handle_data(self, data):
+        if self.stack and not self.skip:
+            d = " ".join(data.split())
+            if d:
+                self.blocks[-1][1].append(("text", html.unescape(d)))
+
+
+# ---------- listing ----------
+
+def parse_cards(page):
+    p = Blocks("data-app-card-handle-value")
+    p.feed(page)
+    rows = []
+    for attrs, toks in p.blocks:
+        text = [t for k, t in toks if k == "text"]
+        joined = " ".join(text)
+        m = re.search(r"([0-9.]+) out of 5 stars", joined)
+        n = re.search(r"([0-9,]+) total reviews", joined)
+        price = None
+        for t in text:
+            if re.match(r"(Free|From \$|\$[0-9]|Free plan|Free trial|Free to install)", t):
+                price = t
+                break
+        rows.append({
+            "handle": attrs["data-app-card-handle-value"],
+            "name": attrs.get("data-app-card-name-value"),
+            "icon": attrs.get("data-app-card-icon-url-value"),
+            "rating": float(m.group(1)) if m else None,
+            "review_count": int(n.group(1).replace(",", "")) if n else 0,
+            "pricing": price,
+            "built_for_shopify": "Built for Shopify" in joined,
+            "tagline": next((t for t in text if len(t) > 25 and "reviews" not in t and "stars" not in t and t != attrs.get("data-app-card-name-value")), None),
+            "text": joined,
+        })
+    return rows
+
+
+def listing(category):
+    out = DATA / "apps.jsonl"
+    seen, rows, page = set(), [], 1
+    while True:
+        body = get(f"{BASE}/categories/{category}/all?page={page}")
+        cards = parse_cards(body) if body else []
+        new = [c for c in cards if c["handle"] not in seen]
+        print(f"page {page}: {len(cards)} cards, {len(new)} new", file=sys.stderr)
+        if not new:
+            break
+        for c in new:
+            seen.add(c["handle"]); c["category"] = category; c["listing_page"] = page
+            rows.append(c)
+        page += 1
+    with out.open("w") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"wrote {len(rows)} apps -> {out}", file=sys.stderr)
+
+
+# ---------- reviews ----------
+
+DATE = re.compile(r"^(Edited )?(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$")
+
+
+def parse_reviews(page, handle):
+    p = Blocks("data-review-content-id")
+    p.feed(page)
+    out = []
+    for attrs, toks in p.blocks:
+        rating = next((int(v[0]) for k, v in toks if k == "aria" and "out of 5 stars" in v), None)
+        store = next((v for k, v in toks if k == "title"), None)
+        # the store name token is the first text token after the title attribute; a body that ends with
+        # the store's signature would otherwise be taken as the anchor and shift country/tenure by one
+        text, store_i, seen_title = [], None, False
+        for k, t in toks:
+            if k == "title":
+                seen_title = True
+            elif k == "text" and t not in ("Show more", "Show less"):
+                if seen_title and store_i is None and t == store:
+                    store_i = len(text)
+                text.append(t)
+        # order observed: [Edited] date, body..., store, country, tenure, "<Dev> replied <date>", reply...
+        row = {"id": attrs["data-review-content-id"], "app": handle, "rating": rating,
+               "date": None, "edited": False, "body": "", "store": store, "country": None, "tenure": None,
+               "reply_date": None, "reply": None}
+        i = 0
+        if text and DATE.match(text[0]):
+            row["edited"] = text[0].startswith("Edited ")
+            row["date"] = text[0].replace("Edited ", ""); i = 1
+        if store_i is None:  # fall back to the tenure token as the anchor
+            t_i = next((j for j, t in enumerate(text) if "using the app" in t), None)
+            store_i = t_i - 2 if t_i is not None and t_i >= i + 2 else None
+            if store_i is not None:
+                row["store"] = text[store_i]
+        if store_i is not None:
+            row["body"] = " ".join(text[i:store_i])
+            tail = text[store_i + 1:]
+            if tail:
+                row["country"] = tail[0]; tail = tail[1:]
+            if tail and "using the app" in tail[0]:
+                row["tenure"] = tail[0]; tail = tail[1:]
+        else:
+            row["body"] = " ".join(text[i:]); tail = []
+        if tail:
+            m = re.match(r"(.+) replied (.+ \d{4})$", tail[0])
+            if m:
+                row["reply_date"] = m.group(2); row["reply"] = " ".join(tail[1:])
+        out.append(row)
+    agg = re.search(r'"aggregateRating":\{[^}]*"ratingValue":([0-9.]+),"ratingCount":(\d+)', page)
+    return out, (float(agg.group(1)), int(agg.group(2))) if agg else (None, None)
+
+
+def reviews(min_reviews):
+    apps = [json.loads(l) for l in (DATA / "apps.jsonl").open()]
+    done_f = DATA / "reviews_done.txt"
+    done = set(done_f.read_text().split()) if done_f.exists() else set()
+    out = (DATA / "reviews.jsonl").open("a")
+    meta = (DATA / "apps_rating.jsonl").open("a")
+    todo = [a for a in apps if a["review_count"] >= min_reviews and a["handle"] not in done]
+    print(f"{len(todo)} apps to fetch ({sum(a['review_count'] for a in todo)} reviews)", file=sys.stderr)
+    for a in todo:
+        h, rows, page = a["handle"], [], 1
+        agg = (None, None)
+        (RAW / h).mkdir(parents=True, exist_ok=True)
+        while True:
+            body = get(f"{BASE}/{h}/reviews?page={page}")
+            if body is None:
+                break
+            with gzip.open(RAW / h / f"p{page}.html.gz", "wt", encoding="utf-8") as g:
+                g.write(body)
+            got, agg2 = parse_reviews(body, h)
+            if agg2[0] is not None:
+                agg = agg2
+            if not got:
+                break
+            rows.extend(got); page += 1
+        for r in rows:
+            out.write(json.dumps(r, ensure_ascii=False) + "\n")
+        meta.write(json.dumps({"handle": h, "rating": agg[0], "rating_count": agg[1], "fetched": len(rows)}) + "\n")
+        out.flush(); meta.flush()
+        with done_f.open("a") as f:
+            f.write(h + "\n")
+        print(f"{h}: {len(rows)} reviews / {a['review_count']} listed", file=sys.stderr)
+
+
+def reparse():
+    """Rebuild reviews.jsonl and apps_rating.jsonl from data/raw without touching the network."""
+    n = 0
+    with (DATA / "reviews.jsonl").open("w") as out, (DATA / "apps_rating.jsonl").open("w") as meta:
+        for d in sorted(RAW.iterdir()):
+            rows, agg = [], (None, None)
+            for f in sorted(d.glob("p*.html.gz"), key=lambda f: int(f.stem[1:-5])):
+                with gzip.open(f, "rt", encoding="utf-8") as g:
+                    got, agg2 = parse_reviews(g.read(), d.name)
+                if agg2[0] is not None:
+                    agg = agg2
+                rows.extend(got)
+            for r in rows:
+                out.write(json.dumps(r, ensure_ascii=False) + "\n")
+            meta.write(json.dumps({"handle": d.name, "rating": agg[0], "rating_count": agg[1], "fetched": len(rows)}) + "\n")
+            n += len(rows)
+    print(f"reparsed {n} reviews", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "listing"
+    if cmd == "listing":
+        listing(sys.argv[2] if len(sys.argv) > 2 else CATEGORY)
+    elif cmd == "reviews":
+        n = int(sys.argv[sys.argv.index("--min") + 1]) if "--min" in sys.argv else 1
+        reviews(n)
+    elif cmd == "reparse":
+        reparse()
+    else:
+        sys.exit(__doc__)
