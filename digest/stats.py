@@ -9,7 +9,7 @@ import json, re, collections
 from datetime import date, timedelta
 from pathlib import Path
 
-DATA = Path(__file__).resolve().parent.parent / "data"
+DATA = Path("data")  # relative to the working directory: run from the project root
 MONTHS = {m: i for i, m in enumerate(["January", "February", "March", "April", "May", "June", "July",
                                       "August", "September", "October", "November", "December"], 1)}
 

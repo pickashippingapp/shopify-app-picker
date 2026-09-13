@@ -17,7 +17,7 @@ The CLI path uses whatever `claude` is logged in as.
 import json, os, re, sys, collections
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path.cwd()  # data/, digests/ and .env are resolved from the working directory: run from the project root
 DATA, OUT = ROOT / "data", ROOT / "digests"
 MODEL = "claude-opus-5"
 FLOOR = 30

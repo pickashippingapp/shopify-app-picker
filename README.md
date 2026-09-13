@@ -4,7 +4,7 @@ The pipeline behind [pickashippingapp.com](https://pickashippingapp.com): scrape
 category and every review of every app in it, compute per-app statistics, and have Claude write a
 digest per app in which every claim cites review ids and every quote is checked against the review text.
 
-Three scripts, no framework:
+Three scripts, no framework. Run them from the repo root: `data/` and `digests/` are resolved from the working directory.
 
     scraper/scrape.py   listing + reviews scraper. Stdlib only, one request per second, resumable,
                         keeps the raw HTML so parser fixes never cost a refetch.

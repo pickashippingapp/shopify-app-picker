@@ -10,7 +10,7 @@ Usage:
 Every fetched reviews page is kept gzipped under data/raw/<handle>/p<N>.html.gz so parser
 fixes never cost a refetch.
 
-Stdlib only. Polite: one request per DELAY seconds, browser UA, retries with backoff.
+Stdlib only. Run from the project root: data/ is resolved from the working directory. Polite: one request per DELAY seconds, browser UA, retries with backoff.
 Resumable: reviews for a handle are written only when all its pages succeeded, and
 handles already present in data/reviews_done.txt are skipped on the next run.
 """
@@ -22,7 +22,7 @@ BASE = "https://apps.shopify.com"
 CATEGORY = "orders-and-shipping-shipping-solutions-shipping"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36"
 DELAY = 1.0
-DATA = Path(__file__).resolve().parent.parent / "data"
+DATA = Path("data")  # relative to the working directory: run from the project root
 RAW = DATA / "raw"
 
 
