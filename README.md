@@ -20,6 +20,9 @@ Three scripts, no framework. Run them from the repo root: `data/` and `digests/`
     python3 scraper/scrape.py listing <category-slug> # any category: the slug from apps.shopify.com/categories/<slug>
     python3 scraper/scrape.py reviews --min 30        # every review of every app with >= 30 reviews -> data/reviews.jsonl
     python3 scraper/scrape.py reparse                 # rebuild reviews.jsonl from data/raw/, no network
+    python3 scraper/scrape.py refresh --min 30        # re-pull listing + reviews, keep the old set as reviews.prev.jsonl,
+                                                      # then diff: new / removed / re-rated / edited -> review_changes.jsonl
+    python3 scraper/scrape.py diff                    # the diff alone, no network
 
 `reviews` is resumable: an app is written only when all its pages succeeded, and apps listed in
 `data/reviews_done.txt` are skipped on the next run. Each review row carries id, rating, date, body,

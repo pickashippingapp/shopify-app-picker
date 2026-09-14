@@ -6,6 +6,13 @@ Usage:
                                     apps.shopify.com/categories/<slug> URL, default: shipping solutions)
   scrape.py reviews [--min N]    -> data/reviews.jsonl (every review of every app; resumable)
   scrape.py reparse              -> rebuild data/reviews.jsonl from the raw HTML cache, no network
+  scrape.py refresh [--min N]    -> re-pull: moves the current dataset to data/reviews.prev.jsonl, fetches the listing
+                                    and every review again, then diffs the two (see `diff`). Resumable; a finished
+                                    refresh clears reviews_done.txt
+  scrape.py diff                 -> compare data/reviews.prev.jsonl with data/reviews.jsonl, no network: append one
+                                    event per new, removed, re-rated or edited review to data/review_changes.jsonl
+                                    and print a summary. Re-rated 1-2 star reviews are listed, since a merchant
+                                    revising a bad review after the developer got in touch is a signal in itself
 
 Every fetched reviews page is kept gzipped under data/raw/<handle>/p<N>.html.gz so parser
 fixes never cost a refetch.
@@ -14,7 +21,7 @@ Stdlib only. Run from the project root: data/ is resolved from the working direc
 Resumable: reviews for a handle are written only when all its pages succeeded, and
 handles already present in data/reviews_done.txt are skipped on the next run.
 """
-import gzip, json, re, sys, time, urllib.request, urllib.error, html
+import collections, gzip, json, re, sys, time, urllib.request, urllib.error, html
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -245,6 +252,70 @@ def reparse():
     print(f"reparsed {n} reviews", file=sys.stderr)
 
 
+def refresh(min_reviews):
+    """Full re-pull of listing and reviews, then a diff against the previous dataset.
+
+    A full pull rather than an incremental one because reviews get unpublished (Shopify's 2026 sweep) and edited, and
+    neither shows up if you stop at the first known id. About 4,000 requests for the shipping category, ~70 minutes.
+    If reviews_done.txt exists a previous refresh was interrupted: resume it instead of rotating again."""
+    cur, prev, done_f = DATA / "reviews.jsonl", DATA / "reviews.prev.jsonl", DATA / "reviews_done.txt"
+    resuming = done_f.exists()
+    if not resuming:
+        if cur.exists():
+            cur.replace(prev)
+        rating = DATA / "apps_rating.jsonl"
+        if rating.exists():
+            rating.replace(DATA / "apps_rating.prev.jsonl")
+        listing(CATEGORY)
+    else:
+        print("resuming an interrupted refresh", file=sys.stderr)
+    reviews(min_reviews)
+    done_f.unlink()
+    diff()
+
+
+def diff():
+    """Compare the previous pull with the current one and append every change to data/review_changes.jsonl.
+
+    Event kinds: new, removed (unpublished by Shopify or the reviewer), rerated (stars changed; old and new kept),
+    edited (text or date changed, stars the same). A rerated event from 1-2 stars upward is the case worth reading:
+    it usually means the developer reached the merchant after the review, which the digests treat as evidence of
+    what happens when things break."""
+    def load(path):
+        return {r["id"]: r for r in map(json.loads, path.open())} if path.exists() else {}
+    old, new = load(DATA / "reviews.prev.jsonl"), load(DATA / "reviews.jsonl")
+    today = time.strftime("%Y-%m-%d")
+    snap = lambda r: {"rating": r["rating"], "date": r["date"], "body": r["body"][:300], "reply": bool(r.get("reply"))}
+    events = []
+    for i, r in new.items():
+        o = old.get(i)
+        if o is None:
+            events.append({"seen": today, "app": r["app"], "id": i, "kind": "new", "new": snap(r)})
+        elif r["rating"] != o["rating"]:
+            events.append({"seen": today, "app": r["app"], "id": i, "kind": "rerated", "old": snap(o), "new": snap(r)})
+        elif (r["body"], r["date"]) != (o["body"], o["date"]):
+            events.append({"seen": today, "app": r["app"], "id": i, "kind": "edited", "old": snap(o), "new": snap(r)})
+    for i, o in old.items():
+        if i not in new:
+            events.append({"seen": today, "app": o["app"], "id": i, "kind": "removed", "old": snap(o)})
+    if old:  # a first pull has nothing to compare with
+        with (DATA / "review_changes.jsonl").open("a") as f:
+            for e in events:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    kinds = collections.Counter(e["kind"] for e in events)
+    up = [e for e in events if e["kind"] == "rerated" and e["old"]["rating"] <= 2 and e["new"]["rating"] > e["old"]["rating"]]
+    old_apps, new_apps = {r["app"] for r in old.values()}, {r["app"] for r in new.values()}
+    print(f"refresh done: {len(new)} reviews ({len(old)} before); +{kinds['new']} new, -{kinds['removed']} removed, "
+          f"{kinds['rerated']} re-rated ({len(up)} up from 1-2 stars), {kinds['edited']} edited; "
+          f"apps: +{len(new_apps - old_apps)} -{len(old_apps - new_apps)}", file=sys.stderr)
+    for e in up:
+        print(f"  revised up  {e['app']} {e['id']}: {e['old']['rating']}->{e['new']['rating']} stars, "
+              f"{'developer replied' if e['new']['reply'] else 'no reply'}; was: {e['old']['body'][:90]!r}", file=sys.stderr)
+    for kind in ("new", "removed"):
+        for app, n in collections.Counter(e["app"] for e in events if e["kind"] == kind).most_common(8):
+            print(f"  {kind:8} {app}: {n}", file=sys.stderr)
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "listing"
     if cmd == "listing":
@@ -254,5 +325,10 @@ if __name__ == "__main__":
         reviews(n)
     elif cmd == "reparse":
         reparse()
+    elif cmd == "refresh":
+        n = int(sys.argv[sys.argv.index("--min") + 1]) if "--min" in sys.argv else 1
+        refresh(n)
+    elif cmd == "diff":
+        diff()
     else:
         sys.exit(__doc__)
