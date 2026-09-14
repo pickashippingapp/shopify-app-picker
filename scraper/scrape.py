@@ -7,8 +7,8 @@ Usage:
   scrape.py reviews [--min N]    -> data/reviews.jsonl (every review of every app; resumable)
   scrape.py reparse              -> rebuild data/reviews.jsonl from the raw HTML cache, no network
   scrape.py refresh [--min N]    -> re-pull: moves the current dataset to data/reviews.prev.jsonl, fetches the listing
-                                    and every review again, then diffs the two (see `diff`). Resumable; a finished
-                                    refresh clears reviews_done.txt
+                                    and every review again, then diffs the two (see `diff`). Resumable through
+                                    data/refresh_in_progress; a finished refresh removes it and reviews_done.txt
   scrape.py diff                 -> compare data/reviews.prev.jsonl with data/reviews.jsonl, no network: append one
                                     event per new, removed, re-rated or edited review to data/review_changes.jsonl
                                     and print a summary. Re-rated 1-2 star reviews are listed, since a merchant
@@ -259,18 +259,21 @@ def refresh(min_reviews):
     neither shows up if you stop at the first known id. About 4,000 requests for the shipping category, ~70 minutes.
     If reviews_done.txt exists a previous refresh was interrupted: resume it instead of rotating again."""
     cur, prev, done_f = DATA / "reviews.jsonl", DATA / "reviews.prev.jsonl", DATA / "reviews_done.txt"
-    resuming = done_f.exists()
-    if not resuming:
+    marker = DATA / "refresh_in_progress"  # exists only between rotation and completion; reviews_done.txt alone is not
+    if marker.exists():                    # enough, a finished first `reviews` run leaves that file behind too
+        print("resuming an interrupted refresh", file=sys.stderr)
+    else:
         if cur.exists():
             cur.replace(prev)
         rating = DATA / "apps_rating.jsonl"
         if rating.exists():
             rating.replace(DATA / "apps_rating.prev.jsonl")
+        done_f.unlink(missing_ok=True)
+        marker.touch()
         listing(CATEGORY)
-    else:
-        print("resuming an interrupted refresh", file=sys.stderr)
     reviews(min_reviews)
-    done_f.unlink()
+    done_f.unlink(missing_ok=True)
+    marker.unlink()
     diff()
 
 
@@ -284,6 +287,9 @@ def diff():
     def load(path):
         return {r["id"]: r for r in map(json.loads, path.open())} if path.exists() else {}
     old, new = load(DATA / "reviews.prev.jsonl"), load(DATA / "reviews.jsonl")
+    if not old:
+        print(f"{len(new)} reviews, no previous pull to compare with", file=sys.stderr)
+        return
     today = time.strftime("%Y-%m-%d")
     snap = lambda r: {"rating": r["rating"], "date": r["date"], "body": r["body"][:300], "reply": bool(r.get("reply"))}
     events = []
@@ -298,10 +304,9 @@ def diff():
     for i, o in old.items():
         if i not in new:
             events.append({"seen": today, "app": o["app"], "id": i, "kind": "removed", "old": snap(o)})
-    if old:  # a first pull has nothing to compare with
-        with (DATA / "review_changes.jsonl").open("a") as f:
-            for e in events:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    with (DATA / "review_changes.jsonl").open("a") as f:
+        for e in events:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
     kinds = collections.Counter(e["kind"] for e in events)
     up = [e for e in events if e["kind"] == "rerated" and e["old"]["rating"] <= 2 and e["new"]["rating"] > e["old"]["rating"]]
     old_apps, new_apps = {r["app"] for r in old.values()}, {r["app"] for r in new.values()}
