@@ -34,6 +34,7 @@ RAW = DATA / "raw"
 
 
 def get(url, tries=5):
+    last = None
     for attempt in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en"})
@@ -44,13 +45,16 @@ def get(url, tries=5):
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return None
+            last = e
             wait = 5 * (attempt + 1) if e.code in (429, 503) else 2
             print(f"  http {e.code} on {url}, retry in {wait}s", file=sys.stderr)
             time.sleep(wait)
-        except Exception as e:  # network blips
-            print(f"  {type(e).__name__} on {url}, retry", file=sys.stderr)
-            time.sleep(3)
-    raise RuntimeError(f"gave up on {url}")
+        except Exception as e:  # network blips, and the minutes after a laptop wakes before Wi-Fi is back
+            last = e
+            wait = 15 * 2 ** attempt  # 15 s .. 4 min, about 8 minutes in total
+            print(f"  {type(e).__name__} on {url}, retry in {wait}s", file=sys.stderr)
+            time.sleep(wait)
+    raise RuntimeError(f"gave up on {url}: {last!r}")
 
 
 class Blocks(HTMLParser):
