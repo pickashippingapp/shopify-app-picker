@@ -10,8 +10,8 @@ Usage:
                                     and every review again, then diffs the two (see `diff`). Resumable through
                                     data/refresh_in_progress; a finished refresh removes it and reviews_done.txt
   scrape.py diff                 -> compare data/reviews.prev.jsonl with data/reviews.jsonl, no network: append one
-                                    event per new, removed, re-rated or edited review to data/review_changes.jsonl
-                                    and print a summary. Re-rated 1-2 star reviews are listed, since a merchant
+                                    event per new, removed, re-rated, edited or re-replied review (with the whole
+                                    previous record) to data/review_changes.jsonl and print a summary. Re-rated 1-2 star reviews are listed, since a merchant
                                     revising a bad review after the developer got in touch is a signal in itself
 
 Every fetched reviews page is kept gzipped under data/raw/<handle>/p<N>.html.gz so parser
@@ -284,10 +284,14 @@ def refresh(min_reviews):
 def diff():
     """Compare the previous pull with the current one and append every change to data/review_changes.jsonl.
 
-    Event kinds: new, removed (unpublished by Shopify or the reviewer), rerated (stars changed; old and new kept),
-    edited (text or date changed, stars the same). A rerated event from 1-2 stars upward is the case worth reading:
-    it usually means the developer reached the merchant after the review, which the digests treat as evidence of
-    what happens when things break."""
+    Event kinds: new, removed (unpublished by Shopify or the reviewer), rerated (stars changed), edited (text or
+    date changed, stars the same), reply (only the developer's reply was added, changed or deleted). A rerated event
+    from 1-2 stars upward is the case worth reading: it usually means the developer reached the merchant after the
+    review, which the digests treat as evidence of what happens when things break.
+
+    `old` is the whole previous record (store, country, tenure, full body, reply text), because after the next
+    rotation this log is the only place it exists. `new` is a short snapshot: the full record is in reviews.jsonl,
+    and lands here as `old` if it changes again."""
     def load(path):
         return {r["id"]: r for r in map(json.loads, path.open())} if path.exists() else {}
     old, new = load(DATA / "reviews.prev.jsonl"), load(DATA / "reviews.jsonl")
@@ -302,12 +306,14 @@ def diff():
         if o is None:
             events.append({"seen": today, "app": r["app"], "id": i, "kind": "new", "new": snap(r)})
         elif r["rating"] != o["rating"]:
-            events.append({"seen": today, "app": r["app"], "id": i, "kind": "rerated", "old": snap(o), "new": snap(r)})
+            events.append({"seen": today, "app": r["app"], "id": i, "kind": "rerated", "old": o, "new": snap(r)})
         elif (r["body"], r["date"]) != (o["body"], o["date"]):
-            events.append({"seen": today, "app": r["app"], "id": i, "kind": "edited", "old": snap(o), "new": snap(r)})
+            events.append({"seen": today, "app": r["app"], "id": i, "kind": "edited", "old": o, "new": snap(r)})
+        elif (r.get("reply"), r.get("reply_date")) != (o.get("reply"), o.get("reply_date")):
+            events.append({"seen": today, "app": r["app"], "id": i, "kind": "reply", "old": o, "new": snap(r)})
     for i, o in old.items():
         if i not in new:
-            events.append({"seen": today, "app": o["app"], "id": i, "kind": "removed", "old": snap(o)})
+            events.append({"seen": today, "app": o["app"], "id": i, "kind": "removed", "old": o})
     with (DATA / "review_changes.jsonl").open("a") as f:
         for e in events:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
@@ -315,7 +321,8 @@ def diff():
     up = [e for e in events if e["kind"] == "rerated" and e["old"]["rating"] <= 2 and e["new"]["rating"] > e["old"]["rating"]]
     old_apps, new_apps = {r["app"] for r in old.values()}, {r["app"] for r in new.values()}
     print(f"refresh done: {len(new)} reviews ({len(old)} before); +{kinds['new']} new, -{kinds['removed']} removed, "
-          f"{kinds['rerated']} re-rated ({len(up)} up from 1-2 stars), {kinds['edited']} edited; "
+          f"{kinds['rerated']} re-rated ({len(up)} up from 1-2 stars), {kinds['edited']} edited, "
+          f"{kinds['reply']} replies changed; "
           f"apps: +{len(new_apps - old_apps)} -{len(old_apps - new_apps)}", file=sys.stderr)
     for e in up:
         print(f"  revised up  {e['app']} {e['id']}: {e['old']['rating']}->{e['new']['rating']} stars, "

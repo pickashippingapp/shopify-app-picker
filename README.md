@@ -21,7 +21,8 @@ Three scripts, no framework. Run them from the repo root: `data/` and `digests/`
     python3 scraper/scrape.py reviews --min 30        # every review of every app with >= 30 reviews -> data/reviews.jsonl
     python3 scraper/scrape.py reparse                 # rebuild reviews.jsonl from data/raw/, no network
     python3 scraper/scrape.py refresh --min 30        # re-pull listing + reviews, keep the old set as reviews.prev.jsonl,
-                                                      # then diff: new / removed / re-rated / edited -> review_changes.jsonl
+                                                      # then diff: new / removed / re-rated / edited / reply changed, each with the
+                                                      # whole previous record -> review_changes.jsonl
     python3 scraper/scrape.py diff                    # the diff alone, no network
 
 `reviews` is resumable: an app is written only when all its pages succeeded, and apps listed in
