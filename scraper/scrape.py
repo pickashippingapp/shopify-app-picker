@@ -8,7 +8,9 @@ Usage:
   scrape.py reparse              -> rebuild data/reviews.jsonl from the raw HTML cache, no network
   scrape.py refresh [--min N]    -> re-pull: moves the current dataset to data/reviews.prev.jsonl, fetches the listing
                                     and every review again, then diffs the two (see `diff`). Resumable through
-                                    data/refresh_in_progress; a finished refresh removes it and reviews_done.txt
+                                    data/refresh_in_progress; a finished refresh removes it and reviews_done.txt.
+                                    An app with a digest (digests/<handle>.json) that drops out of the listing keeps
+                                    its previous row, marked "listed": false, so its reviews are still fetched
   scrape.py diff                 -> compare data/reviews.prev.jsonl with data/reviews.jsonl, no network: append one
                                     event per new, removed, re-rated, edited or re-replied review (with the whole
                                     previous record) to data/review_changes.jsonl and print a summary. Re-rated 1-2 star reviews are listed, since a merchant
@@ -274,11 +276,31 @@ def refresh(min_reviews):
             rating.replace(DATA / "apps_rating.prev.jsonl")
         done_f.unlink(missing_ok=True)
         marker.touch()
+        before = (DATA / "apps.jsonl").read_text().splitlines() if (DATA / "apps.jsonl").exists() else []
         listing(CATEGORY)
+        keep_digested(before)
     reviews(min_reviews)
     done_f.unlink(missing_ok=True)
     marker.unlink()
     diff()
+
+
+def keep_digested(before):
+    """Re-add apps that have a digest but left the category listing, from their previous row.
+
+    The listing churns (18 apps out one day, 17 back the next) while the apps stay live on the App Store. Without
+    this, a digested app that drops out loses every review, every citation in its digest turns dangling and its page
+    cannot be built. Apps without a digest are left to the listing."""
+    out = DATA / "apps.jsonl"
+    listed = {json.loads(l)["handle"] for l in out.open()}
+    digested = {f.stem for f in Path("digests").glob("*.json")}
+    kept = [r for r in map(json.loads, before) if r["handle"] in digested - listed]
+    with out.open("a") as f:
+        for r in kept:
+            r["listed"] = False
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    if kept:
+        print(f"kept {len(kept)} digested apps no longer in the listing: {', '.join(r['handle'] for r in kept)}", file=sys.stderr)
 
 
 def diff():
