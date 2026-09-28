@@ -36,10 +36,16 @@ apps.shopify.com, which is what makes the digests checkable.
     python3 digest/run.py cli <handle>      # one app through the Claude Code CLI (`claude -p`, no API key)
     python3 digest/run.py cli-all 2         # every app above the floor, two at a time; skips existing digests
     python3 digest/run.py revalidate        # re-run the citation and quote checks over digests/
+    python3 digest/run.py semantic          # does each cited review support its claim? -> data/semantic.jsonl
 
 With an API key (`ANTHROPIC_API_KEY`, or a line in `.env`), `pip install anthropic` and use the
 Message Batches path instead: `prepare`, `submit`, `status`, `collect`. Same prompt, same schema,
 same validator, about a seventh of the cost.
+
+`semantic` catches what the validator cannot: a real id cited for a claim the review does not make.
+It sends each (claim, review) pair to TypeSafe's System One (`pip install typesafe-sdk`,
+`TYPESAFE_API_KEY`), which scores it no / partly / yes, and lists pairs scoring under 0.5 for a human
+read. It never edits a digest: on a hand-checked sample, 9 of 12 flags were real mis-citations.
 
 The system prompt and schema are written for shipping apps (the segment list, the persona). Change
 `SEGMENTS` and `SYSTEM` in `digest/run.py` for another category.

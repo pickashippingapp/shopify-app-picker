@@ -10,9 +10,10 @@
   run.py cli <handle>       same digest through the local `claude -p` CLI (Claude Code subscription, no API key)
   run.py cli-all [N]        every app above the floor through the CLI, N at a time (default 2); skips existing digests
   run.py revalidate         re-run the citation/quote validator over every digest on disk (no network)
+  run.py semantic [handle…] score whether each cited review supports its claim (TypeSafe System One) -> data/semantic.jsonl
 
 Credentials for the API path: ANTHROPIC_API_KEY from the environment, or a KEY=VALUE line in ./.env (gitignored).
-The CLI path uses whatever `claude` is logged in as.
+The CLI path uses whatever `claude` is logged in as. `semantic` needs `pip install typesafe-sdk` and TYPESAFE_API_KEY (environment or .env).
 """
 import json, os, re, sys, collections
 from pathlib import Path
@@ -374,9 +375,67 @@ def revalidate():
     print(f"revalidated {len(list(OUT.glob('*.json')))} digests, {total} problems")
 
 
+SEMANTIC_MODEL = "jev-latest"
+SEMANTIC_FLAG = 0.5  # expected score below this = the review does not support the claim; read it by hand
+
+
+def semantic(handles=()):
+    """Does each cited review say what its claim says? One TypeSafe System One call per (claim, review id) pair.
+
+    The validator only proves ids exist and quotes are verbatim; this scores the pair 0-2 (no / partly / yes) and
+    writes every pair to data/semantic.jsonl. Pairs below SEMANTIC_FLAG are printed for a human read, never dropped:
+    on a hand-checked sample 9 of 12 flags were real mis-citations. One pair per call on purpose; batching many
+    pairs into one state array made the per-item answers drift."""
+    from concurrent.futures import ThreadPoolExecutor
+    load_env()
+    from typesafe_sdk import TypeSafeClient, Score
+    ts = TypeSafeClient()
+    question = Score(
+        instructions="Does the review itself give direct evidence for the claim? 0 = no (unrelated, or says the opposite), "
+                     "1 = partly (touches it but not the specific point), 2 = yes (the review describes what the claim says).",
+        criteria=["no", "partly", "yes"])
+    _, _, reviews = load_data()
+    pairs = []
+    for f in sorted(OUT.glob("*.json")):
+        d = json.loads(f.read_text())
+        if handles and d["handle"] not in handles:
+            continue
+        by_id = {r["id"]: r for r in reviews[d["handle"]]}
+        for section in ("good_at", "failures", "red_flags"):
+            for t in d.get(section, []):
+                claim = t.get("theme") or t.get("flag")
+                pairs += [(d["handle"], section, claim, by_id[i]) for i in t["review_ids"] if i in by_id]
+
+    def score(p):
+        handle, section, claim, r = p
+        state = (f"Claim made about a Shopify app in a review digest:\n{claim}\n\n"
+                 f"One review cited for it ({r['rating']} stars, {r['date']}):\n{r['body']}")
+        row = {"app": handle, "section": section, "claim": claim, "id": r["id"], "model": SEMANTIC_MODEL}
+        try:
+            resp = ts.system_one(state=state, questions={"evidence": question}, model=SEMANTIC_MODEL)
+        except Exception as e:
+            return row | {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+        a = resp.scores["evidence"]
+        return row | {"score": round(a.score, 3), "confidence": round(a.confidence, 3), "tokens":
+                      resp.usage.input_tokens + resp.usage.output_tokens, "request_id": resp.request_id}
+
+    print(f"{len(pairs)} (claim, review) pairs", flush=True)
+    with ThreadPoolExecutor(8) as ex:
+        rows = list(ex.map(score, pairs))
+    with (DATA / "semantic.jsonl").open("w") as out:
+        for row in rows:
+            out.write(json.dumps(row, ensure_ascii=False) + "\n")
+    flagged = sorted((r for r in rows if r.get("score", 2) < SEMANTIC_FLAG), key=lambda r: (r["app"], r["score"]))
+    for r in flagged:
+        print(f"{r['app']}: {r['section']}/{r['claim'][:90]}: {r['id']} scores {r['score']}")
+    errors = sum("error" in r for r in rows)
+    print(f"scored {len(rows) - errors} pairs across {len({r['app'] for r in rows})} digests, {len(flagged)} flagged, "
+          f"{errors} errors, {sum(r.get('tokens', 0) for r in rows)} tokens -> {DATA / 'semantic.jsonl'}")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     {"prepare": prepare, "one": lambda: one(sys.argv[2]), "submit": submit, "status": status, "collect": collect,
      "cli": lambda: cli(sys.argv[2]), "cli-all": lambda: cli_all(int(sys.argv[2]) if len(sys.argv) > 2 else 2),
-     "revalidate": revalidate}.get(
+     "revalidate": revalidate, "semantic": lambda: semantic(sys.argv[2:])}.get(
         cmd, lambda: sys.exit(__doc__))()
