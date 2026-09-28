@@ -409,7 +409,8 @@ def semantic(handles=()):
     def score(p):
         handle, section, claim, r = p
         state = (f"Claim made about a Shopify app in a review digest:\n{claim}\n\n"
-                 f"One review cited for it ({r['rating']} stars, {r['date']}):\n{r['body']}")
+                 f"One review cited for it ({r['rating']} stars, {r['date']}):\n{r['body'] or '(no text)'}\n\n"
+                 + (f"Developer's public reply ({r['reply_date']}):\n{r['reply']}" if r["reply"] else "The developer has not replied to this review."))
         row = {"app": handle, "section": section, "claim": claim, "id": r["id"], "model": SEMANTIC_MODEL}
         try:
             resp = ts.system_one(state=state, questions={"evidence": question}, model=SEMANTIC_MODEL)
