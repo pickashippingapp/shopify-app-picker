@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path.cwd()  # data/, digests/ and .env are resolved from the working directory: run from the project root
 DATA, OUT = ROOT / "data", ROOT / "digests"
 MODEL = "claude-opus-5"
+CLI_MODEL = "sonnet"  # `claude -p --model` alias for the cli/cli-all path
 FLOOR = 30
 MAX_TOKENS = 16000
 
@@ -286,7 +287,7 @@ class UsageLimit(RuntimeError):
     """The CLI refused because of a usage window, rate limit or auth problem: stop the run, don't burn the queue."""
 
 
-def cli_one(handle, apps, stats, reviews, model="opus"):
+def cli_one(handle, apps, stats, reviews, model=CLI_MODEL):
     """Run one digest through `claude -p`. Prompt on stdin, schema-constrained JSON back."""
     import subprocess, tempfile
     params = build_params(handle, apps, stats, reviews)
@@ -313,7 +314,7 @@ def cli_one(handle, apps, stats, reviews, model="opus"):
         digest = json.loads(env["result"])
     digest["_validation"] = validate(handle, digest, reviews)
     digest["_meta"] = {"backend": "claude-cli", "model": model, "models_used": list((env.get("modelUsage") or {}).keys()),
-                       "fallback": model != "opus", "cost_usd": env.get("total_cost_usd"),
+                       "fallback": model != CLI_MODEL, "cost_usd": env.get("total_cost_usd"),
                        "duration_ms": env.get("duration_ms"), "usage": env.get("usage"), "session_id": env.get("session_id")}
     OUT.mkdir(exist_ok=True)
     (OUT / f"{handle}.json").write_text(json.dumps(digest, ensure_ascii=False, indent=2))
