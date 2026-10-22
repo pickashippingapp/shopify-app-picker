@@ -45,6 +45,7 @@ def app_stats(rows, today):
         "with_text": sum(1 for r in rows if r["body"]),
         "countries": collections.Counter(r["country"] for r in rows if r["country"]).most_common(8),
         "tenure_under_month_share": round(sum(1 for r in rows if r["tenure"] and re.search(r"\b(hour|minute|day)s?\b", r["tenure"])) / len(rows), 2),
+        "as_of": today.isoformat(),  # the date the windows above are measured from; site/build.py prints it as the corpus month
     }
 
 

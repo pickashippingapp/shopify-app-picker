@@ -155,7 +155,7 @@ def build_params(handle, apps, stats, reviews):
         f"# App: {a['name']} (handle: {handle})\n"
         f"Listing: rating {a['rating']}, {a['review_count']} reviews, pricing: {a['pricing']}, "
         f"built for Shopify: {a['built_for_shopify']}\nTagline: {a['tagline']}\n\n"
-        f"# Precomputed statistics (trust these numbers)\n{json.dumps(s, ensure_ascii=False)}\n\n"
+        f"# Precomputed statistics (trust these numbers)\n{json.dumps({k: v for k, v in s.items() if k != 'as_of'}, ensure_ascii=False)}\n\n"  # as_of is for the site, not the model
         f"# All {len(rows)} reviews, newest first\n\n" + "\n\n".join(review_line(r) for r in rows)
     )
     return {
