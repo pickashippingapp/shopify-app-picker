@@ -5,7 +5,7 @@ These are the numbers the comparison table shows and the digest prompt is given 
 context. They are computed here, never by the model: momentum, negative share,
 recency, developer reply behaviour, country and tenure mix.
 """
-import json, re, collections
+import json, re, sys, collections
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -50,15 +50,28 @@ def app_stats(rows, today):
 
 
 def main():
+    """Write one row per app in reviews.jsonl; the previous stats.jsonl is replaced only once every row is computed.
+
+    An app in reviews.jsonl but not in apps.jsonl keeps its row, with "name": null, and is named in a warning on
+    stderr. reviews.jsonl is the corpus; the gap almost always means apps.jsonl is older than the reviews (apps.jsonl
+    is committed, reviews.jsonl is local, so a checkout of an earlier commit pairs an old listing with newer reviews).
+    """
     today = date.today()
     by_app = collections.defaultdict(list)
     for l in (DATA / "reviews.jsonl").open():
         r = json.loads(l); by_app[r["app"]].append(r)
     apps = {a["handle"]: a for a in map(json.loads, (DATA / "apps.jsonl").open())}
-    with (DATA / "stats.jsonl").open("w") as out:
-        for h, rows in sorted(by_app.items(), key=lambda kv: -len(kv[1])):
-            s = {"handle": h, "name": apps[h]["name"], **app_stats(rows, today)}
-            out.write(json.dumps(s, ensure_ascii=False) + "\n")
+    out = []
+    for h, rows in sorted(by_app.items(), key=lambda kv: -len(kv[1])):
+        s = {"handle": h, "name": apps[h]["name"] if h in apps else None, **app_stats(rows, today)}
+        out.append(json.dumps(s, ensure_ascii=False) + "\n")
+    missing = [h for h in by_app if h not in apps]
+    if missing:
+        print(f"warning: {len(missing)} apps in reviews.jsonl are not in apps.jsonl (stats kept, name null): "
+              f"{', '.join(missing)}", file=sys.stderr)
+    tmp = DATA / "stats.jsonl.tmp"
+    tmp.write_text("".join(out), encoding="utf-8")
+    tmp.replace(DATA / "stats.jsonl")
     print(f"stats for {len(by_app)} apps -> {DATA / 'stats.jsonl'}")
 
 
