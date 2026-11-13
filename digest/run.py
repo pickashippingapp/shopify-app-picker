@@ -14,6 +14,9 @@
 
 Credentials for the API path: ANTHROPIC_API_KEY from the environment, or a KEY=VALUE line in ./.env (gitignored).
 The CLI path uses whatever `claude` is logged in as. `semantic` needs `pip install typesafe-sdk` and TYPESAFE_API_KEY (environment or .env).
+
+An app with a stats.jsonl row but no apps.jsonl row is digested without its listing details and named in a warning
+on stderr (see build_params). Every digest needs a stats.jsonl row: rerun stats.py after a review pull first.
 """
 import json, os, re, sys, collections
 from pathlib import Path
@@ -149,12 +152,23 @@ def review_line(r):
 
 
 def build_params(handle, apps, stats, reviews):
-    a, s = apps[handle], stats[handle]
+    """The request for one app's digest.
+
+    An app with no apps.jsonl row (stats.py keeps it, with "name": null; see stats.main for why the gap happens)
+    is still digested: the header names it by handle and says only that the listing details are not available.
+    The reviews are the corpus; the listing is context. Callers name such apps with warn_unlisted.
+    A handle with no stats.jsonl row raises KeyError: rerun stats.py first.
+    """
+    a, s = apps.get(handle), stats[handle]
     rows = sorted(reviews[handle], key=lambda r: r["id"], reverse=True)  # newest first
+    if a:
+        head = (f"# App: {a['name']} (handle: {handle})\n"
+                f"Listing: rating {a['rating']}, {a['review_count']} reviews, pricing: {a['pricing']}, "
+                f"built for Shopify: {a['built_for_shopify']}\nTagline: {a['tagline']}\n\n")
+    else:
+        head = f"# App: {handle} (handle: {handle})\nListing details (rating, pricing, tagline) are not available.\n\n"
     body = (
-        f"# App: {a['name']} (handle: {handle})\n"
-        f"Listing: rating {a['rating']}, {a['review_count']} reviews, pricing: {a['pricing']}, "
-        f"built for Shopify: {a['built_for_shopify']}\nTagline: {a['tagline']}\n\n"
+        head +
         f"# Precomputed statistics (trust these numbers)\n{json.dumps({k: v for k, v in s.items() if k != 'as_of'}, ensure_ascii=False)}\n\n"  # as_of is for the site, not the model
         f"# All {len(rows)} reviews, newest first\n\n" + "\n\n".join(review_line(r) for r in rows)
     )
@@ -165,9 +179,18 @@ def build_params(handle, apps, stats, reviews):
     }
 
 
+def warn_unlisted(handles, apps):
+    """Name, on stderr, the apps about to be digested that have no apps.jsonl row (build_params says what they get)."""
+    missing = [h for h in handles if h not in apps]
+    if missing:
+        print(f"warning: {len(missing)} apps to digest are not in apps.jsonl (digested without listing details): "
+              f"{', '.join(missing)}", file=sys.stderr, flush=True)
+
+
 def prepare():
     apps, stats, reviews = load_data()
     handles = [h for h, s in stats.items() if s["reviews"] >= FLOOR]
+    warn_unlisted(handles, apps)
     with (DATA / "digest_requests.jsonl").open("w") as f:
         for h in handles:
             p = build_params(h, apps, stats, reviews)
@@ -221,6 +244,7 @@ def write_digest(handle, msg, reviews, usage=None):
 
 def one(handle):
     apps, stats, reviews = load_data()
+    warn_unlisted([handle], apps)
     c = client()
     params = build_params(handle, apps, stats, reviews)
     with c.messages.stream(**params) as stream:
@@ -323,6 +347,7 @@ def cli_one(handle, apps, stats, reviews, model=CLI_MODEL):
 
 def cli(handle):
     apps, stats, reviews = load_data()
+    warn_unlisted([handle], apps)
     d = cli_one(handle, apps, stats, reviews)
     v = d["_validation"]
     print(f"{handle}: cited={v['cited_ids']} problems={len(v['problems'])} cost=${d['_meta']['cost_usd']} "
@@ -337,6 +362,7 @@ def cli_all(parallel=2):
     done = {p.stem for p in OUT.glob("*.json")} if OUT.exists() else set()
     handles = [h for h, s in sorted(stats.items(), key=lambda kv: kv[1]["reviews"]) if s["reviews"] >= FLOOR and h not in done]
     print(f"{len(handles)} apps to digest, {parallel} at a time", flush=True)
+    warn_unlisted(handles, apps)
     stop = False
 
     def work(h):
