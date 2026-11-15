@@ -8,7 +8,9 @@ Usage:
   scrape.py reparse              -> rebuild data/reviews.jsonl from the raw HTML cache, no network
   scrape.py refresh [--min N]    -> re-pull: moves the current dataset to data/reviews.prev.jsonl, fetches the listing
                                     and every review again, then diffs the two (see `diff`). Resumable through
-                                    data/refresh_in_progress; a finished refresh removes it and reviews_done.txt.
+                                    data/refresh_in_progress; a finished refresh removes it and reviews_done.txt and writes
+                                    data/review_pull.json, {"finished": <ISO time with offset>}, which site/build.py
+                                    prints as the date of the review pull (`reviews` and `reparse` do not write it).
                                     An app with a digest (digests/<handle>.json) that drops out of the listing keeps
                                     its previous row, marked "listed": false, so its reviews are still fetched
   scrape.py diff                 -> compare data/reviews.prev.jsonl with data/reviews.jsonl, no network: append one
@@ -24,6 +26,7 @@ Resumable: reviews for a handle are written only when all its pages succeeded, a
 handles already present in data/reviews_done.txt are skipped on the next run.
 """
 import collections, gzip, json, re, sys, time, urllib.request, urllib.error, html
+from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -263,7 +266,9 @@ def refresh(min_reviews):
 
     A full pull rather than an incremental one because reviews get unpublished (Shopify's 2026 sweep) and edited, and
     neither shows up if you stop at the first known id. About 4,000 requests for the shipping category, ~70 minutes.
-    If reviews_done.txt exists a previous refresh was interrupted: resume it instead of rotating again."""
+    If reviews_done.txt exists a previous refresh was interrupted: resume it instead of rotating again.
+    When the pull is complete, data/review_pull.json records its finish time: the one place the site reads the date
+    of the review pull from (not the mtime of reviews.jsonl, which a copy or a touch changes)."""
     cur, prev, done_f = DATA / "reviews.jsonl", DATA / "reviews.prev.jsonl", DATA / "reviews_done.txt"
     marker = DATA / "refresh_in_progress"  # exists only between rotation and completion; reviews_done.txt alone is not
     if marker.exists():                    # enough, a finished first `reviews` run leaves that file behind too
@@ -282,6 +287,7 @@ def refresh(min_reviews):
     reviews(min_reviews)
     done_f.unlink(missing_ok=True)
     marker.unlink()
+    (DATA / "review_pull.json").write_text(json.dumps({"finished": datetime.now().astimezone().isoformat(timespec="seconds")}) + "\n")
     diff()
 
 
